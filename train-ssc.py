@@ -89,12 +89,25 @@ class SSDataset(object):
             return i, x, self.unlabeled_label
 
 
+class WhiteNoise(object):
+
+    def __init__(self, std=0.15):
+        self.std = std
+
+    def __call__(self, x):
+        n = x.clone()
+        n.normal_(0, self.std)
+        return x + n
+
+
 def load_cifar10(opts, unlabeled_label=-1):
     train_transform = transforms.Compose([
         transforms.Resize((32, 32)),
         transforms.RandomCrop((32, 32), padding=2),
         transforms.RandomHorizontalFlip(),
-        transforms.ToTensor()])
+        transforms.ToTensor(),
+        WhiteNoise(0.15)
+    ])
 
     test_transform = transforms.Compose([
         transforms.Resize((32, 32)),
@@ -207,7 +220,7 @@ class Trainer(object):
             self.n += len(x.size())
             if batch_idx % self.opts.log_interval == 0:
                 print('Train Epoch: {} [{}/{} ({:.0f}%)]'
-                      '\ttotal_oss: {:.6f} (xent_loss: {:.6f}, center_loss: {:.6f})'.format(
+                      '\ttotal_loss: {:.6f} (xent_loss: {:.6f}, center_loss: {:.6f})'.format(
                           self.epoch, batch_idx * self.opts.batch_size,
                           len(self.train_dataset),
                           100. * batch_idx / len(self.train_dataloader),
@@ -217,7 +230,6 @@ class Trainer(object):
                 self.writer.add_scalar('cifar10/train-center-loss', closs.data[0], self.n)
                 
         self.epoch += 1
-
         
     def validate(self):
         self.model.eval()
