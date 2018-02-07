@@ -106,12 +106,17 @@ def load_cifar10(opts, unlabeled_label=-1):
         transforms.RandomCrop((32, 32), padding=2),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5),
+                             (0.5, 0.5, 0.5)),
         WhiteNoise(0.15)
     ])
 
     test_transform = transforms.Compose([
         transforms.Resize((32, 32)),
-        transforms.ToTensor()])
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5),
+                             (0.5, 0.5, 0.5)),
+    ])
     
     train_dataset = SSDataset(datasets.CIFAR10('../data', train=True, download=True),
                               opts.labeled_train_size, opts.unlabeled_train_size,
@@ -154,7 +159,9 @@ class Trainer(object):
     def compute_beta(self):
         if self.epoch < self.opts.rampup_length:
             p = self.epoch / self.opts.rampup_length
-            return self.opts.beta * p
+            p = 1.0 - p
+            return self.opts.beta * math.exp(-p * p * 5.0)
+#            return self.opts.beta * p
         else:
             return self.opts.beta
 
