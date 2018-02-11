@@ -13,10 +13,11 @@ class EMA(nn.Module):
         self.eps = eps
 
     def forward(self, i, x):
-        center = self.centers[i]
+        center = self.centers[i].clone()
         counts = self.counts[i]
         c = 1 + self.eps  - torch.exp(self.log_alpha * counts)  # 1 - alpha^counts
+        center /= (c.unsqueeze(1).expand_as(center))
         if self.training:
             self.centers.data[i] -= (1 - self.alpha) * (center.data - x.data)
             self.counts.data[i] += 1            
-        return center / (c.unsqueeze(1).expand_as(center))
+        return center

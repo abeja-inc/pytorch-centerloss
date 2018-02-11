@@ -28,8 +28,9 @@ class Conv2dBlock(nn.Module):
 
 class ConvLarge(nn.Module):
 
-    def __init__(self):
+    def __init__(self, output_dim=10):
         super(ConvLarge, self).__init__()
+        self.output_dim = output_dim
 
         self.net = nn.Sequential(
             Conv2dBlock(3, 128, 3, 1, 1),
@@ -42,13 +43,29 @@ class ConvLarge(nn.Module):
             Conv2dBlock(256, 256, 3, 1, 1),
             nn.MaxPool2d(2, stride=2),
             nn.Dropout2d(0.5),
-            Conv2dBlock(256, 512, 3, 1, 1),
+            Conv2dBlock(256, 512, 3, 1, 0),
             Conv2dBlock(512, 256, 1, 1, 0),
             Conv2dBlock(256, 128, 1, 1, 0),
-            nn.AvgPool2d(8, 1),
+            nn.AvgPool2d(6, 1),
         )
         
-        self.fc = nn.Linear(128, 10)
+        self.fc = nn.Linear(128, output_dim)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        '''Init layer parameters.'''
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal(m.weight, mode='fan_out')
+                if m.bias is not None:
+                    nn.init.constant(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant(m.weight, 1)
+                nn.init.constant(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal(m.weight, std=1e-3)
+                if m.bias is not None:
+                    nn.init.constant(m.bias, 0)                
 
     def forward(self, x):
         x = x.view(-1, 3, 32, 32)

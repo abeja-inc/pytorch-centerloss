@@ -25,17 +25,17 @@ def load_option():
                         help='number of epochs to train (default: 300)')
     parser.add_argument('--labeled-train-size', type=int, default=4000,
                         help='labeled training dataset size for training')
-    parser.add_argument('--unlabeled-train-size', type=int, default=36000,
+    parser.add_argument('--unlabeled-train-size', type=int, default=46000,
                         help='unlabeled training dataset size for training if negative alue is given use all remaining data')
-    parser.add_argument('--lr', type=float, default=0.001, metavar='LR',
-                        help='learning rate (default: 0.001)')
+    parser.add_argument('--lr', type=float, default=0.003, metavar='LR',
+                        help='learning rate (default: 0.003)')
     parser.add_argument('--no-cuda', action='store_true', default=False,
                         help='enables CUDA training')
     parser.add_argument('--seed', type=int, default=0, metavar='S',
                         help='random seed (default: 0)')
     parser.add_argument('--log-interval', type=int, default=10, metavar='N',
                         help='how many batches to wait before logging training status')
-    parser.add_argument('--regularization', type=str, choices=['TE', 'TE++', 'TE#', 'Null'], default='TE#',
+    parser.add_argument('--regularization', type=str, choices=['TE', 'TE++', 'Null'], default='TE',
                         help='regularization type')
     parser.add_argument('--alpha', type=float, default=0.6,
                         help='decay rate of moving average')
@@ -59,20 +59,29 @@ class SSDataset(object):
 
     def __init__(self, dataset, supervised_size, unsupervised_size=None, transform=None, unlabeled_label=-1):
         assert(supervised_size <= len(dataset)) 
-        assert(unsupervised_size is None or supervised_size + unsupervised_size <= len(dataset))
+        assert(unsupervised_size is None \
+               or unsupervised_size < 0 \
+               or supervised_size + unsupervised_size <= len(dataset))
         self.dataset = dataset
         self.supervised_size = supervised_size
-        self.unsupervised_size = unsupervised_size if unsupervised_size is not None else len(dataset) - supervised_size
+        if unsupervised_size is not None and unsupervised_size >= 0:
+            self.unsupervised_size = unsupervised_size
+        else:
+            self.unsupervised_size = len(dataset) - supervised_size
         self.transform = transform
         self.unlabeled_label = unlabeled_label
 
         indices = np.random.choice(np.arange(len(self.dataset)), len(self), replace=False)
-        # s_indices = np.random.choice(indices, self.supervised_size, replace=False)
         s_indices = np.random.choice(np.arange(len(self)), self.supervised_size, replace=False)
-        supervised = np.zeros(len(indices))
+        supervised = np.zeros(len(self))
         supervised[s_indices] = 1
+        assert((supervised == 1).sum() == self.supervised_size)
+        assert((supervised == 0).sum() == self.unsupervised_size)
         self.indices = indices
         self.supervised = supervised  # supervised (1) or not unsupervised (0)
+
+        assert(self.supervised_size >= 0)
+        assert(self.unsupervised_size >= 0)
 
     def __len__(self):
         return self.supervised_size + self.unsupervised_size
@@ -91,7 +100,7 @@ class SSDataset(object):
 
 class WhiteNoise(object):
 
-    def __init__(self, std=0.15):
+    def __init__(self, std=0.04):
         self.std = std
 
     def __call__(self, x):
@@ -99,7 +108,7 @@ class WhiteNoise(object):
         n.normal_(0, self.std)
         return x + n
 
-
+    
 def load_cifar10(opts, unlabeled_label=-1):
     train_transform = transforms.Compose([
         transforms.Resize((32, 32)),
@@ -108,7 +117,7 @@ def load_cifar10(opts, unlabeled_label=-1):
         transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5),
                              (0.5, 0.5, 0.5)),
-        WhiteNoise(0.15)
+        WhiteNoise(0.04)
     ])
 
     test_transform = transforms.Compose([
@@ -117,13 +126,13 @@ def load_cifar10(opts, unlabeled_label=-1):
         transforms.Normalize((0.5, 0.5, 0.5),
                              (0.5, 0.5, 0.5)),
     ])
-    
-    train_dataset = SSDataset(datasets.CIFAR10('../data', train=True, download=True),
+
+    train_dataset = SSDataset(datasets.CIFAR10('./data', train=True, download=True),
                               opts.labeled_train_size, opts.unlabeled_train_size,
                               transform=train_transform,
                               unlabeled_label=unlabeled_label)
     
-    test_dataset = datasets.CIFAR10('../data', train=False,
+    test_dataset = datasets.CIFAR10('./data', train=False,
                                     transform=test_transform)
 
     return train_dataset, test_dataset
@@ -152,25 +161,27 @@ class Trainer(object):
 
         self.xent_loss = nn.CrossEntropyLoss(ignore_index=opts.unlabeled_label)
         self.optim = optim.Adam(self.model.parameters(), lr=opts.lr)
+#        self.optim = optim.RMSprop(self.model.parameters(), lr=opts.lr)
         self.writer = SummaryWriter(comment='-{}'.format(opts.expname))
         self.epoch = 0
         self.n = 0
 
-    def compute_beta(self):
+    @property
+    def rampup(self):
         if self.epoch < self.opts.rampup_length:
-            p = self.epoch / self.opts.rampup_length
+            p = max(0, self.epoch / self.opts.rampup_length)
             p = 1.0 - p
-            return self.opts.beta * math.exp(-p * p * 5.0)
-#            return self.opts.beta * p
+            return math.exp(-p * p * 5.0)
         else:
-            return self.opts.beta
+            return 1.0
 
-    def compute_learning_rate(self):
+    @property
+    def rampdown(self):
         if self.epoch >= (self.opts.max_epoch - self.opts.rampdown_length):
             ep = (self.epoch - (self.opts.max_epoch - self.opts.rampdown_length)) * 0.5
-            return math.exp(-(ep * ep) / self.opts.rampdown_length) * self.opts.lr
+            return math.exp(-(ep * ep) / self.opts.rampdown_length)
         else:
-            return 1.0 * self.opts.lr
+            return 1.0
 
     def train(self):
         self.model.train()
@@ -179,8 +190,11 @@ class Trainer(object):
         y = None
         for batch_idx, (idx, data, label) in enumerate(self.train_dataloader):
             # set the learning rate
-            lr = self.compute_learning_rate()
+            beta = self.opts.beta * self.rampup
+            lr = self.opts.lr * self.rampdown * self.rampup
+            adam_beta = (self.rampdown * 0.9 + (1 - self.rampdown) * 0.5, 0.999)
             self.optim.param_groups[0]['lr'] = lr
+            self.optim.param_groups[0]['beta'] = adam_beta
             # set the variables
             if x is None:
                 assert(y is None)
@@ -197,30 +211,24 @@ class Trainer(object):
                 if self.opts.cuda:
                     idx = idx.cuda()
             
-            self.model.zero_grad()
+            self.optim.zero_grad()
             logit = self.model(x)
-            logprob = F.log_softmax(logit)
-            prob = torch.exp(logprob)
-            # prob = F.softmax(logit)
-            # logprob = torch.log(prob)
-
             loss = self.xent_loss(logit, y)
             if self.opts.regularization == 'TE':
-                center = self.center(idx, logit)
-                closs = ((logit - center) ** 2).sum(1).mean() / self.opts.num_classes
-            elif self.opts.regularization == 'TE++':
+                prob = F.softmax(logit)                
                 center = self.center(idx, prob)
-                closs = ((prob - center) ** 2).sum(1).mean() / self.opts.num_classes
-            elif self.opts.regularization == 'TE#':
+                closs = ((prob - center) ** 2).mean()
+            elif self.opts.regularization == 'TE++':
+                logprob = F.log_softmax(prob)                
                 center = self.center(idx, logprob)
-                closs = (prob * ((logprob - center) ** 2)).sum(1).mean()
+                closs = ((logprob - center) ** 2).mean()
             else:
                 if self.opts.cuda:
                     closs = Variable(torch.FloatTensor([0]).cuda())                
                 else:
                     closs = Variable(torch.FloatTensor([0]))                
 
-            total_loss = loss + self.compute_beta() * closs
+            total_loss = loss + beta * closs
             total_loss.backward()
             self.optim.step()
 
