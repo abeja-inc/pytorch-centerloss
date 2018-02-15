@@ -35,14 +35,14 @@ def load_option():
                         help='random seed (default: 0)')
     parser.add_argument('--log-interval', type=int, default=10, metavar='N',
                         help='how many batches to wait before logging training status')
-    parser.add_argument('--regularization', type=str, choices=['TE', 'TE++', 'Null'], default='TE',
+    parser.add_argument('--regularization', type=str, choices=['TE', 'TE++', 'TE#', 'Null'], default='TE',
                         help='regularization type')
     parser.add_argument('--alpha', type=float, default=0.6,
                         help='decay rate of moving average')
     parser.add_argument('--beta', type=float, default=0.1, 
                         help='bayes inverse temparature (default=1.0)')
-    parser.add_argument('--unlabeled-label', type=int, default=-100, 
-                        help='label for unlabeled data (default=-100)')
+    # parser.add_argument('--unlabeled-label', type=int, default=-100, 
+    #                     help='label for unlabeled data (default=-100)')
     parser.add_argument('--rampup-length', type=int, default=80,
                         help='duration linearly ramping-up beta')
     parser.add_argument('--rampdown-length', type=int, default=50,
@@ -51,7 +51,7 @@ def load_option():
                         help='number of classes in dataset')
     args = parser.parse_args()
     args.cuda = not args.no_cuda and torch.cuda.is_available()
-
+    args.unlabeled_label = args.num_classes
     return args
 
 
@@ -92,6 +92,7 @@ class SSDataset(object):
         x, y = self.dataset[idx]
         if self.transform:
             x = self.transform(x)
+        assert(y != self.unlabeled_label)
         if s:
             return i, x, y
         else:
@@ -100,7 +101,7 @@ class SSDataset(object):
 
 class WhiteNoise(object):
 
-    def __init__(self, std=0.04):
+    def __init__(self, std=0.15):
         self.std = std
 
     def __call__(self, x):
@@ -109,25 +110,31 @@ class WhiteNoise(object):
         return x + n
 
     
-def load_cifar10(opts, unlabeled_label=-1):
+def load_cifar10(opts, unlabeled_label):
+
+    train_dataset = datasets.CIFAR10('./data', train=True, download=True)
+    # compute the means and stds
+    mean = np.asarray([train_dataset.train_data[:, :, :, i].mean() for i in range(3)])
+    std = np.asarray([train_dataset.train_data[:, :, :, i].std() for i in range(3)])
+    mean /= 255
+    std /= 255
+    
     train_transform = transforms.Compose([
         transforms.Resize((32, 32)),
         transforms.RandomCrop((32, 32), padding=2),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5),
-                             (0.5, 0.5, 0.5)),
-        WhiteNoise(0.04)
+        transforms.Normalize(mean, std),
+        WhiteNoise(0.15)
     ])
 
     test_transform = transforms.Compose([
         transforms.Resize((32, 32)),
         transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5),
-                             (0.5, 0.5, 0.5)),
+        transforms.Normalize(mean, std),
     ])
 
-    train_dataset = SSDataset(datasets.CIFAR10('./data', train=True, download=True),
+    train_dataset = SSDataset(train_dataset,
                               opts.labeled_train_size, opts.unlabeled_train_size,
                               transform=train_transform,
                               unlabeled_label=unlabeled_label)
@@ -219,9 +226,14 @@ class Trainer(object):
                 center = self.center(idx, prob)
                 closs = ((prob - center) ** 2).mean()
             elif self.opts.regularization == 'TE++':
-                logprob = F.log_softmax(prob)                
+                logprob = F.log_softmax(logit)                
                 center = self.center(idx, logprob)
                 closs = ((logprob - center) ** 2).mean()
+            elif self.opts.regularization == 'TE#':
+                logprob = F.log_softmax(logit)                
+                center = self.center(idx, logprob)
+                closs = ((logprob[y.data] - center[y.data]) ** 2).mean()
+#                closs = ((logprob - center) ** 2).mean()
             else:
                 if self.opts.cuda:
                     closs = Variable(torch.FloatTensor([0]).cuda())                
@@ -268,7 +280,7 @@ class Trainer(object):
             prob = F.softmax(logit)
             logprob = torch.log(prob)
             loss += self.xent_loss(logit, y).data[0]
-            y_pred = logit.data.max(1)[1] # get the index with maximal probability
+            y_pred = logit.data[:, :self.opts.num_classes].max(1)[1] # get the index with maximal probability
             correct += y_pred.eq(y.data).cpu().sum()
         loss /= len(self.valid_dataloader)
         print('Test Epoch: {}/{} ({:.1f}%)'
@@ -289,11 +301,10 @@ class Trainer(object):
 def main():
 
     opts = load_option()
-    opts.num_classes = 10
     train_dataset, test_dataset = load_cifar10(opts, unlabeled_label=opts.unlabeled_label)
 
-    model = ConvLarge()
-    center = EMA((len(train_dataset), opts.num_classes), opts.alpha)
+    model = ConvLarge(opts.num_classes + 1)
+    center = EMA((len(train_dataset), opts.num_classes + 1), opts.alpha)
     if opts.cuda:
         model.cuda()
         center.cuda()
