@@ -38,4 +38,4 @@ where <expname> is any string which will appear in the `runs' area of in Tensorb
 # references
 
 - [1] [S. Laine+, "Temporal Ensembling for Semi-Supervised Learning", 2016](https://arxiv.org/abs/1610.02242)
-- [2] [S. Watanabe, "Asymptotic Equivalence of Bayes Cross Validation and Widely Applicable Information Criterion in Singular Learning Theory", 2010](Asymptotic Equivalence of Bayes Cross Validation and Widely Applicable Information Criterion in Singular Learning Theory)
+- [2] [S. Watanabe, "Asymptotic Equivalence of Bayes Cross Validation and Widely Applicable Information Criterion in Singular Learning Theory", 2010](http://www.jmlr.org/papers/volume11/watanabe10a/watanabe10a.pdf)
