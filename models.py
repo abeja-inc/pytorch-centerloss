@@ -56,16 +56,16 @@ class ConvLarge(nn.Module):
         '''Init layer parameters.'''
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal(m.weight, mode='fan_out')
+                nn.init.kaiming_normal_(m.weight, mode='fan_out')
                 if m.bias is not None:
-                    nn.init.constant(m.bias, 0)
+                    nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant(m.weight, 1)
-                nn.init.constant(m.bias, 0)
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.Linear):
-                nn.init.normal(m.weight, std=1e-3)
+                nn.init.normal_(m.weight, std=1e-3)
                 if m.bias is not None:
-                    nn.init.constant(m.bias, 0)                
+                    nn.init.constant_(m.bias, 0)                
 
     def forward(self, x):
         x = x.view(-1, 3, 32, 32)

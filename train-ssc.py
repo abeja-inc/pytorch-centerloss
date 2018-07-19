@@ -5,7 +5,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.autograd import Variable
 from torchvision import transforms, datasets
 from tensorboardX import SummaryWriter
 from models import ConvLarge
@@ -17,7 +16,9 @@ def load_option():
     parser = argparse.ArgumentParser()
     parser.add_argument('expname', type=str,
                         help='name of the experiment')
-    parser.add_argument('--batch-size', type=int, default=100,
+    parser.add_argument('--dataset', type=str, default='CIFAR10',
+                        help='dataset (CIFAR10, CIFAR100, or /path/to/image/folder/)')
+    parser.add_argument('--batch-size', type=int, default=20,
                         help='input batch size for training (default: 10)')
     parser.add_argument('--batches-per-epoch', type=int, default=-1,
                         help='number of batches per epoch if negative value is given use #dataset/batch_size')
@@ -35,7 +36,7 @@ def load_option():
                         help='random seed (default: 0)')
     parser.add_argument('--log-interval', type=int, default=10, metavar='N',
                         help='how many batches to wait before logging training status')
-    parser.add_argument('--regularization', type=str, choices=['TE', 'TE++', 'WAIC', 'TE#', 'Null'], default='TE',
+    parser.add_argument('--regularization', type=str, choices=['TE', 'TE++', 'WAIC', 'TE#', 'LEVEL', 'Null'], default='TE',
                         help='regularization type')
     parser.add_argument('--alpha', type=float, default=0.6,
                         help='decay rate of moving average')
@@ -49,10 +50,14 @@ def load_option():
                         help='duration linearly ramping-down learning rate')
     parser.add_argument('--num-classes', type=int, default=10,
                         help='number of classes in dataset')
+    parser.add_argument('--image-size', type=str, default='32,32',
+                        help='height, width')
     args = parser.parse_args()
     assert(args.regularization != 'WAIC' or args.unlabeled_train_size == 0)
     args.cuda = not args.no_cuda and torch.cuda.is_available()
     args.unlabeled_label = args.num_classes
+    h, w = [int(x) for x in args.image_size.split(',')]
+    args.image_size = (h, w)
     return args
 
 
@@ -137,8 +142,8 @@ def load_cifar10(opts, unlabeled_label):
     std /= 255
     
     train_transform = transforms.Compose([
-        transforms.Resize((32, 32)),
-        transforms.RandomCrop((32, 32), padding=2),
+        transforms.Resize(opts.image_size),
+        transforms.RandomCrop(opts.image_size, padding=2),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize(mean, std),
@@ -146,7 +151,42 @@ def load_cifar10(opts, unlabeled_label):
     ])
 
     test_transform = transforms.Compose([
-        transforms.Resize((32, 32)),
+        transforms.Resize(opts.image_size),
+        transforms.ToTensor(),
+        transforms.Normalize(mean, std),
+    ])
+
+    train_dataset = SSDataset(train_dataset,
+                              opts.labeled_train_size, opts.unlabeled_train_size,
+                              transform=train_transform,
+                              unlabeled_label=unlabeled_label)
+    
+    test_dataset = datasets.CIFAR10('./data', train=False,
+                                    transform=test_transform)
+
+    return train_dataset, test_dataset
+
+
+def load_image_folder(opts, unlabeled_label):
+
+    train_dataset = datasets.ImageFolder(opts.dataset, train=True)
+    # compute means and stds
+    mean = np.asarray([train_dataset.train_data[:, :, :, i].mean() for i in range(3)])
+    std = np.asarray([train_dataset.train_data[:, :, :, i].std() for i in range(3)])
+    mean /= 255
+    std /= 255
+    
+    train_transform = transforms.Compose([
+        transforms.Resize(opts.image_size),
+        transforms.RandomCrop(opts.image_size, padding=2), 
+       transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean, std),
+        WhiteNoise(0.15)
+    ])
+
+    test_transform = transforms.Compose([
+        transforms.Resize(opts.image_size),
         transforms.ToTensor(),
         transforms.Normalize(mean, std),
     ])
@@ -184,7 +224,8 @@ class Trainer(object):
                                                             pin_memory=pin_memory)
 
         self.xent_loss = nn.CrossEntropyLoss(ignore_index=opts.unlabeled_label)
-        self.optim = optim.Adam(self.model.parameters(), lr=opts.lr)
+        self.optim = optim.Adam(self.model.parameters(), lr=opts.lr, weight_decay=0.0001)
+#        self.optim = optim.Adam(self.model.parameters(), lr=opts.lr)
 #        self.optim = optim.RMSprop(self.model.parameters(), lr=opts.lr)
 #        self.optim = optim.SGD(self.model.parameters(), lr=opts.lr)
         self.writer = SummaryWriter(comment='-{}'.format(opts.expname))
@@ -228,38 +269,46 @@ class Trainer(object):
             if x is None:
                 assert(y is None)
                 if self.opts.cuda:
-                    data = data.cuda()
-                    label = label.cuda()
-                    idx = idx.cuda()
-                x = Variable(data)
-                y = Variable(label)
+                    data = data.to('cuda')
+                    label = label.to('cuda')
+                    idx = idx.to('cuda')
+                x = data
+                y = label
             else:
                 assert(y is not None)
-                x.data.resize_(data.size()).copy_(data)
-                y.data.resize_(label.size()).copy_(label)
+                x.resize_(data.size()).copy_(data)
+                y.resize_(label.size()).copy_(label)
                 if self.opts.cuda:
-                    idx = idx.cuda()
+                    idx = idx.to('cuda')
             
             self.optim.zero_grad()
             logit = self.model(x)
             loss = self.xent_loss(logit, y)
             if self.opts.regularization == 'TE':
-                prob = F.softmax(logit)                
-                center = self.center(idx, prob)
+                prob = F.softmax(logit, dim=1)                
+                center = self.center(idx, prob.data)
                 closs = ((prob - center) ** 2).mean()
             elif self.opts.regularization == 'TE++':
-                logprob = F.log_softmax(logit)                
-                center = self.center(idx, logprob)
+                logprob = F.log_softmax(logit, dim=1)                
+                center = self.center(idx, logprob.data)
                 closs = ((logprob - center) ** 2).mean()
-            elif self.opts.regularization in ['TE#', 'WAIC']:
-                logprob = F.log_softmax(logit)                
+            elif self.opts.regularization == 'WAIC':
+                logprob = F.log_softmax(logit, dim=1)
+                logprob_y = logprob.gather(1, y.unsqueeze(1))
+                center = self.center([idx, y.data], logprob_y.data)
+                closs = ((logprob_y - center.unsqueeze(1)) ** 2).mean()
+            elif self.opts.regularization == 'LEVEL':
+                logprob = F.log_softmax(logit, dim=1)
+                closs = ((logprob - math.log(1/self.opts.num_classes)) ** 2).mean()
+            elif self.opts.regularization == 'TE#':
+                logprob = F.log_softmax(logit, dim=1)                
                 center = self.center(idx, logprob)
                 closs = ((logprob[y.data] - center[y.data]) ** 2).mean()
             else:
                 if self.opts.cuda:
-                    closs = Variable(torch.FloatTensor([0]).cuda())                
+                    closs = torch.FloatTensor([0]).to('cuda')
                 else:
-                    closs = Variable(torch.FloatTensor([0]))                
+                    closs = torch.FloatTensor([0])
 
             total_loss = loss + beta * closs
             total_loss.backward()
@@ -272,10 +321,10 @@ class Trainer(object):
                           self.epoch, batch_idx * self.opts.batch_size,
                           len(self.train_dataset),
                           100. * batch_idx / len(self.train_dataloader),
-                          total_loss.data[0], loss.data[0], closs.data[0]))
-                self.writer.add_scalar('cifar10/train-loss', total_loss.data[0], self.n)
-                self.writer.add_scalar('cifar10/train-xent-loss', loss.data[0], self.n)
-                self.writer.add_scalar('cifar10/train-center-loss', closs.data[0], self.n)
+                          total_loss.item(), loss.item(), closs.item()))
+                self.writer.add_scalar('cifar10/train-loss', total_loss.item(), self.n)
+                self.writer.add_scalar('cifar10/train-xent-loss', loss.item(), self.n)
+                self.writer.add_scalar('cifar10/train-center-loss', closs.item(), self.n)
                 
         self.epoch += 1
         
@@ -289,20 +338,21 @@ class Trainer(object):
             if x is None:
                 assert(y is None)
                 if self.opts.cuda:
-                    data = data.cuda()
-                    label = label.cuda()
-                    x = Variable(data, volatile=True)
-                    y = Variable(label, volatile=True)
+                    data = data.to('cuda')
+                    label = label.to('cuda')
+                    x = data
+                    y = label
             else:
                 assert(y is not None)
                 x.data.resize_(data.size()).copy_(data)
                 y.data.resize_(label.size()).copy_(label)
-            logit = self.model(x)
-            prob = F.softmax(logit)
-            logprob = torch.log(prob)
-            loss += self.xent_loss(logit, y).data[0]
+            with torch.set_grad_enabled(False):
+                logit = self.model(x)
+                prob = F.softmax(logit, dim=1)
+                logprob = torch.log(prob)
+            loss += self.xent_loss(logit, y).item()
             y_pred = logit.data[:, :self.opts.num_classes].max(1)[1] # get the index with maximal probability
-            correct += y_pred.eq(y.data).cpu().sum()
+            correct += y_pred.eq(y.data).to('cpu').sum()
         loss /= len(self.valid_dataloader)
         print('Test Epoch: {}/{} ({:.1f}%)'
               '\txent-loss: {:.4f}, accuracy: {}/{} ({:.4f}%)'.format(
@@ -322,14 +372,15 @@ class Trainer(object):
 def main():
 
     opts = load_option()
+    print(opts)
     train_dataset, test_dataset = load_cifar10(opts, unlabeled_label=opts.unlabeled_label)
 
     model = ConvLarge(opts.num_classes + 1)
     center = EMA((len(train_dataset), opts.num_classes + 1), opts.alpha)
     if opts.cuda:
-        model.cuda()
-        center.cuda()
-
+        model.to('cuda')
+        center.to('cuda')
+        
     trainer = Trainer(model, center, train_dataset, test_dataset, opts)
 
     trainer.validate()
